@@ -1,0 +1,8 @@
+[package]
+
+name = "bike.rs"
+version = "0.0.1"
+authors = ["Сухарик <suhr@i2pmail.org>"]
+
+[[lib]]
+name = "bike"
