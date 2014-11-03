@@ -1,19 +1,22 @@
 #![crate_name = "bike"]
 #![crate_type = "lib"]
 
+#![feature(slicing_syntax)]
+
 use std::collections::{HashMap, TreeMap};
-use std::io::{MemReader, IoError, IoErrorKind, EndOfFile};
+use std::io::{Buffer, MemReader, IoError, IoErrorKind, EndOfFile};
+use std::string;
 
 #[deriving(PartialEq,Show,Clone)]
 pub enum BObject {
     Number(f64),
-    String(String),
-    List(List),
-    Dictonary(Dictonary),
+    String(string::String),
+    List(BList),
+    Dictonary(BDictonary),
 }
 
-pub type List = Vec<BObject>;
-pub type Dictonary = TreeMap<String, BObject>;
+pub type BList = Vec<BObject>;
+pub type BDictonary = TreeMap<string::String, BObject>;
 
 pub enum ErrorCode {
 }
@@ -25,9 +28,9 @@ enum Token {
     LParen,
     RParen,
     Equals,
-    StrTok(String),
+    StrTok(string::String),
     NumTok(f64),
-    Ident(String),
+    Ident(string::String),
     EOF,
 }
 
@@ -38,7 +41,7 @@ struct Tokenizer {
 
 #[deriving(PartialEq,Show)]
 enum TokenError {
-    IoError(IoError),
+    ReadError(IoError),
     InvalidNumber,
     DisclosedString,
     NotUtf8,
@@ -46,7 +49,7 @@ enum TokenError {
 }
 
 impl Tokenizer {
-    fn new(src: Vec<u8>) -> Tokenizer {
+    fn from_vec(src: Vec<u8>) -> Tokenizer {
         let mr = MemReader::new(src);
         Tokenizer{source: mr, ch: None}
     }
@@ -56,7 +59,7 @@ impl Tokenizer {
             match self.source.read_char() {
                 Ok(c) => self.ch = Some(c),
                 Err(ref e) if e.kind == EndOfFile  => return Ok(EOF),
-                Err(e) => return Err(IoError(e)),
+                Err(e) => return Err(ReadError(e)),
             }
         }
 
@@ -67,7 +70,7 @@ impl Tokenizer {
                     self.ch = match self.source.read_char() {
                         Ok(c) => Some(c),
                         Err(ref e) if e.kind == EndOfFile  => return Ok(EOF),
-                        Err(e) => return Err(IoError(e)),
+                        Err(e) => return Err(ReadError(e)),
                     };
                     continue
                 },
@@ -75,7 +78,7 @@ impl Tokenizer {
                     self.ch = match self.source.read_char() {
                         Ok(c) => Some(c),
                         Err(ref e) if e.kind == EndOfFile  => return Ok(EOF),
-                        Err(e) => return Err(IoError(e)),
+                        Err(e) => return Err(ReadError(e)),
                     };
                     continue
                 },
@@ -84,7 +87,7 @@ impl Tokenizer {
                 '(' => { self.ch = None ; Ok(LParen) },
                 ')' => { self.ch = None ; Ok(RParen) },
                 '=' => { self.ch = None ; Ok(Equals) },
-                '-' | '0'..'9'       => self.num_token(),
+                '-' | '0'...'9'       => self.num_token(),
                 '\''                 => self.str_token(),
                 c if c as u32 >= 65  => self.ident_token(),
                 _ => Err(UnexpectedT),
@@ -95,7 +98,7 @@ impl Tokenizer {
         match self.source.read_line() {
             Ok(_) => Ok(()),
             Err(ref e) if e.kind == EndOfFile => Ok(()),
-            Err(e) => Err(IoError(e)),
+            Err(e) => Err(ReadError(e)),
         }
     }
 
@@ -111,7 +114,7 @@ impl Tokenizer {
                     if v.last() != Some(&('\'' as u8)) {
                         return Err(DisclosedString)
                     };
-                    vec = vec.append(v.as_slice());
+                    vec.push_all(v[]);
 
                     match self.source.read_char() {
                         Ok('\'') => continue,
@@ -123,16 +126,16 @@ impl Tokenizer {
                             self.ch = None;
                             break
                         },
-                        Err(e) => return Err(IoError(e)),
+                        Err(e) => return Err(ReadError(e)),
                     }
                 },
                 Err(ref e) if e.kind == EndOfFile  => return Err(DisclosedString),
-                Err(e) => return Err(IoError(e)),
+                Err(e) => return Err(ReadError(e)),
             }
         }
 
         vec.pop().unwrap();
-        match String::from_utf8(vec) {
+        match string::String::from_utf8(vec) {
             Ok(str) => Ok(StrTok(str)),
             Err(_) => Err(NotUtf8),
         }
@@ -145,7 +148,7 @@ impl Tokenizer {
             }
         }
 
-        let mut id = String::from_char(1, self.ch.unwrap());
+        let mut id = string::String::from_char(1, self.ch.unwrap());
         loop {
             match self.source.read_char() {
                 Ok(c) if c.is_whitespace() || reserved_char(c)  => {
@@ -153,14 +156,14 @@ impl Tokenizer {
                     break
                 },
                 Ok(c) => {
-                    id.push_char(c);
+                    id.push(c);
                     continue
                 },
                 Err(ref e) if e.kind == EndOfFile  => {
                     self.ch = None;
                     break
                 },
-                Err(e) => return Err(IoError(e)),
+                Err(e) => return Err(ReadError(e)),
             }
         };
 
@@ -170,15 +173,15 @@ impl Tokenizer {
 
 
 enum Nonterm {
-    ListNT(List),
-    DictNT(Dictonary),
+    ListNT(BList),
+    DictNT(BDictonary),
     ObjectNT(BObject),
 }
 
 #[deriving(PartialEq,Show)]
 enum ParseError {
 //    IoError(IoError),
-    TokenError(TokenError),
+    LexError(TokenError),
     UnexpectedEOF,
     ExpectedFound(Token, Token),
     Unexpected(Token),
@@ -281,15 +284,15 @@ impl Parser {
         match self.lexer.token() {
             Ok(t) => Ok(t),
             //Err(IoError(e)) => IoError(e),
-            Err(e) => Err(TokenError(e)),
+            Err(e) => Err(LexError(e)),
         }
     }
 }
 
 
 #[test] fn lexer_test() {
-    let str = "('is it workin''?') = lol ; comment".as_bytes().into_vec();
-    let mut lex = Tokenizer::new(str);
+    let str = "('is it workin''?') = lol ; comment".as_bytes().to_vec();
+    let mut lex = Tokenizer::from_vec(str);
 
     assert_eq!(lex.token(), Ok(LParen));
     assert_eq!(lex.token(), Ok(StrTok("is it workin'?".into_string())));
@@ -302,13 +305,13 @@ impl Parser {
 #[test] fn parser_test() {
     let str = "'bikeML' = name 
                 ('fun' 'minimalistic' 'crazy') = features 
-                {'foo' = bar  'bar' = baz} = lol ; yeah!".as_bytes().into_vec();
-    let mut parser = Parser::new(Tokenizer::new(str));
+                {'foo' = bar  'bar' = baz} = lol ; yeah!".as_bytes().to_vec();
+    let mut parser = Parser::new(Tokenizer::from_vec(str));
     let obj = parser.parse();
 
     let root = match obj {
         Ok(Dictonary(d)) => d,
-        _ => fail!(),
+        _ => panic!(),
     };
 
     assert_eq!(root["name".into_string()], String("bikeML".into_string()));
@@ -322,7 +325,7 @@ impl Parser {
 
     let dict = match root["lol".into_string()].clone() {
         Dictonary(d) => d,
-        _ => fail!(),
+        _ => panic!(),
     };
     assert_eq!(dict["bar".into_string()], String("foo".into_string()));
     assert_eq!(dict["baz".into_string()], String("bar".into_string()));
